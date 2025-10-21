@@ -1,0 +1,278 @@
+<!DOCTYPE html><html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Mobile 3D Walkaround</title>
+  <style>
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; background: #0b0e12; color: #eee;
+      -webkit-tap-highlight-color: transparent;
+      touch-action: none; /* We'll manage gestures */
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif;
+    }
+    #ui {
+      position: fixed; inset: 0; pointer-events: none; display: grid; grid-template-rows: 1fr auto; z-index: 10;
+    }
+    #topbar {
+      display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 8px 10px; pointer-events: auto;
+      background: linear-gradient(180deg, rgba(0,0,0,.5), rgba(0,0,0,0));
+    }
+    .btn {
+      pointer-events: auto; border: 1px solid rgba(255,255,255,.2); background: rgba(13,17,23,.6); color: #fff;
+      padding: 8px 12px; border-radius: 12px; font-size: 14px; backdrop-filter: blur(6px);
+    }
+    .btn:active { transform: scale(0.98); }#hud { pointer-events: none; display: flex; gap: 8px; align-items: center; }
+#fps { font-variant-numeric: tabular-nums; opacity: .8; font-size: 12px; }
+
+/* Joysticks */
+.stick-area {
+  position: fixed; bottom: 16px; width: 44vw; max-width: 360px; aspect-ratio: 1/1; pointer-events: auto;
+  border-radius: 24px; background: rgba(255,255,255,.05); border: 1px dashed rgba(255,255,255,.15);
+}
+#left-area { left: 16px; }
+#right-area { right: 16px; }
+.stick {
+  position: absolute; width: 32%; aspect-ratio: 1/1; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  border-radius: 999px; background: rgba(255,255,255,.3); box-shadow: 0 4px 18px rgba(0,0,0,.35);
+  border: 1px solid rgba(255,255,255,.35);
+}
+
+/* Action buttons */
+#actions { position: fixed; right: 16px; bottom: calc(16px + 44vw + 16px); display: flex; flex-direction: column; gap: 10px; }
+.action { pointer-events: auto; background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.2); color:#fff; padding: 10px 14px; border-radius: 999px; font-weight: 600; }
+
+/* Helper toast */
+#hint { position: fixed; left: 50%; transform: translateX(-50%); bottom: 12px; background: rgba(0,0,0,.55); color: #fff; padding: 8px 12px; border-radius: 10px; font-size: 12px; opacity: .8; pointer-events: none; }
+
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div id="topbar">
+      <div id="hud">
+        <span>📱 Mobile 3D</span>
+        <span id="fps">-- FPS</span>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button class="btn" id="btnFull">Fullscreen</button>
+        <button class="btn" id="btnPerf">Performance: High</button>
+        <button class="btn" id="btnLight">Flashlight: Off</button>
+      </div>
+    </div>
+  </div>  <div id="left-area" class="stick-area"><div id="left-stick" class="stick"></div></div>
+  <div id="right-area" class="stick-area"><div id="right-stick" class="stick"></div></div>
+  <div id="actions">
+    <button class="action" id="btnJump">Jump</button>
+    <button class="action" id="btnRun">Run: Off</button>
+  </div>  <div id="hint">Left stick: move • Right stick: look • Jump/Run on the side • Flashlight in top right</div>  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+    // --- Renderer & Scene ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0e12);
+    scene.fog = new THREE.Fog(0x0b0e12, 25, 140);
+
+    // --- Camera (FPS style)
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 1.6, 5);
+
+    // --- Lighting ---
+    const hemi = new THREE.HemisphereLight(0x88aaff, 0x223344, 0.9);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir.position.set(10, 15, 10);
+    dir.castShadow = false;
+    scene.add(dir);
+
+    // Flashlight (spot attached to camera)
+    const spot = new THREE.SpotLight(0xffffff, 0.0, 30, Math.PI/5, 0.25, 1);
+    spot.position.copy(camera.position);
+    spot.target.position.set(0, 1.6, -1);
+    camera.add(spot);
+    camera.add(spot.target);
+    scene.add(camera);
+
+    // --- Ground ---
+    const groundGeo = new THREE.PlaneGeometry(500, 500, 64, 64);
+    groundGeo.rotateX(-Math.PI/2);
+    // add slight random height variation for texture without heavy geometry
+    const pos = groundGeo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const y = (Math.sin(pos.getX(i) * 0.05) + Math.cos(pos.getZ(i) * 0.05)) * 0.2;
+      pos.setY(i, y);
+    }
+    pos.needsUpdate = true;
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x1a252e, roughness: 1.0, metalness: 0.0 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.receiveShadow = false;
+    scene.add(ground);
+
+    // --- Landmarks/obstacles ---
+    const boxMat = new THREE.MeshStandardMaterial({ color: 0x4db1ff, roughness: 0.8 });
+    for (let i = 0; i < 80; i++) {
+      const s = 0.5 + Math.random() * 3.5;
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), boxMat);
+      mesh.position.set((Math.random()-0.5)*120, s/2, (Math.random()-0.5)*120);
+      scene.add(mesh);
+    }
+
+    // --- Simple FPS controller with gravity ---
+    let yaw = 0; let pitch = 0; // radians
+    let velY = 0; const GRAV = -20; const JUMP_V = 7.5; let canJump = true;
+
+    const state = {
+      moveX: 0, // -1 left, +1 right
+      moveZ: 0, // -1 back, +1 forward
+      running: false,
+    };
+
+    function clamp(v, min, max){ return Math.max(min, Math.min(max, v)); }
+
+    function updateCameraRotation(dx, dy){
+      const SENS = 0.004; // touch sensitivity
+      yaw -= dx * SENS;
+      pitch -= dy * SENS;
+      pitch = clamp(pitch, -Math.PI/2 + 0.01, Math.PI/2 - 0.01);
+      const q = new THREE.Quaternion();
+      q.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+      camera.quaternion.copy(q);
+    }
+
+    function moveForwardDist(dist){
+      const dirVec = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+      dirVec.y = 0; dirVec.normalize();
+      camera.position.addScaledVector(dirVec, dist);
+    }
+    function moveRightDist(dist){
+      const right = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
+      right.y = 0; right.normalize();
+      camera.position.addScaledVector(right, dist);
+    }
+
+    // --- Joystick handlers ---
+    function setupStick(areaEl, stickEl, onChange){
+      let active = false; let id = null; let base = {x:0, y:0};
+      let cur = {x:0, y:0}; const R = areaEl.clientWidth * 0.38;
+
+      const toLocal = (touch) => {
+        const rect = areaEl.getBoundingClientRect();
+        return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+      };
+
+      areaEl.addEventListener('touchstart', (e) => {
+        if (active) return; // single touch per stick
+        const t = e.changedTouches[0]; id = t.identifier; active = true; base = toLocal(t); cur = {...base};
+        stickEl.style.left = base.x + 'px'; stickEl.style.top = base.y + 'px'; stickEl.style.transform = 'translate(-50%,-50%) scale(1)';
+      }, {passive:false});
+
+      areaEl.addEventListener('touchmove', (e) => {
+        if (!active) return;
+        for (const t of e.changedTouches){ if (t.identifier === id){ cur = toLocal(t);} }
+        const dx = cur.x - base.x; const dy = cur.y - base.y;
+        const len = Math.hypot(dx, dy); const cl = Math.min(len, R);
+        const nx = (dx/ (len || 1)) * cl; const ny = (dy/ (len || 1)) * cl;
+        stickEl.style.left = (base.x + nx) + 'px'; stickEl.style.top = (base.y + ny) + 'px';
+        onChange(nx / R, ny / R); // normalized -1..1
+      }, {passive:false});
+
+      function end(){ active = false; id = null; onChange(0,0); stickEl.style.left = '50%'; stickEl.style.top = '50%'; }
+      areaEl.addEventListener('touchend', (e)=>{ for (const t of e.changedTouches){ if (t.identifier===id) end(); } }, {passive:false});
+      areaEl.addEventListener('touchcancel', (e)=>{ for (const t of e.changedTouches){ if (t.identifier===id) end(); } }, {passive:false});
+    }
+
+    // Move stick (left): x => left/right, y => forward/back (inverted y)
+    setupStick(document.getElementById('left-area'), document.getElementById('left-stick'), (nx, ny) => {
+      state.moveX = nx; // -1 left, +1 right
+      state.moveZ = -ny; // up is forward
+    });
+
+    // Look stick (right): dx, dy -> yaw/pitch
+    let lastLook = {x:0, y:0};
+    setupStick(document.getElementById('right-area'), document.getElementById('right-stick'), (nx, ny) => {
+      // Scale to pixels-ish (stick radius already normalized). Map to deltas.
+      const dx = nx * 160; const dy = ny * 160;
+      updateCameraRotation(dx, dy);
+    });
+
+    // --- Buttons ---
+    const btnJump = document.getElementById('btnJump');
+    const btnRun  = document.getElementById('btnRun');
+    const btnPerf = document.getElementById('btnPerf');
+    const btnFull = document.getElementById('btnFull');
+    const btnLight= document.getElementById('btnLight');
+
+    btnJump.addEventListener('click', () => {
+      if (canJump) { velY = JUMP_V; canJump = false; }
+    });
+    btnRun.addEventListener('click', () => {
+      state.running = !state.running; btnRun.textContent = `Run: ${state.running ? 'On' : 'Off'}`;
+    });
+    btnPerf.addEventListener('click', () => {
+      perfHigh = !perfHigh;
+      renderer.setPixelRatio(perfHigh ? Math.min(window.devicePixelRatio, 1.5) : 1.0);
+      dir.intensity = perfHigh ? 0.6 : 0.35;
+      hemi.intensity = perfHigh ? 0.9 : 0.7;
+      btnPerf.textContent = `Performance: ${perfHigh ? 'High' : 'Low'}`;
+    });
+    btnFull.addEventListener('click', async () => {
+      const el = document.documentElement;
+      if (!document.fullscreenElement) { try { await el.requestFullscreen(); } catch(_){} }
+      else { try { await document.exitFullscreen(); } catch(_){} }
+    });
+    btnLight.addEventListener('click', () => {
+      spot.intensity = spot.intensity > 0 ? 0.0 : 2.0; // toggle
+      btnLight.textContent = `Flashlight: ${spot.intensity>0? 'On':'Off'}`;
+    });
+
+    // --- Resize ---
+    function onResize(){
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    window.addEventListener('resize', onResize);
+
+    // --- Main loop ---
+    let last = performance.now();
+    let perfHigh = true; let frames = 0; let fpsAcc = 0; const fpsEl = document.getElementById('fps');
+
+    function loop(){
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - last) / 1000); // cap dt for stability
+      last = now;
+
+      // movement speed
+      const base = 4.2; const speed = state.running ? base * 1.8 : base;
+      if (state.moveZ !== 0) moveForwardDist(state.moveZ * speed * dt);
+      if (state.moveX !== 0) moveRightDist(state.moveX * speed * dt);
+
+      // gravity + ground (y = terrain height approx 0 with small undulation)
+      velY += GRAV * dt;
+      camera.position.y += velY * dt;
+      const groundY = 1.6 + Math.sin(camera.position.x*0.05 + camera.position.z*0.03)*0.05; // slight bob with terrain
+      if (camera.position.y <= groundY) { camera.position.y = groundY; velY = 0; canJump = true; }
+
+      // keep flashlight on camera
+      spot.position.copy(camera.position);
+      const forward = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+      spot.target.position.copy(camera.position).add(forward);
+
+      renderer.render(scene, camera);
+
+      // fps
+      frames++; fpsAcc += dt; if (fpsAcc >= 0.5){ fpsEl.textContent = `${Math.round(frames/fpsAcc)} FPS`; frames=0; fpsAcc=0; }
+
+      requestAnimationFrame(loop);
+    }
+    loop();
+
+    // Dismiss hint after a few seconds
+    setTimeout(()=>{ const h = document.getElementById('hint'); h && (h.style.display='none'); }, 5000);
+  </script></body>
+</html>
